@@ -5,7 +5,7 @@ from datetime import datetime
 import time
 
 # --- 1. Dashboard Configuration ---
-st.set_page_config(page_title="Discovery Intelligence Dashboard", layout="wide")
+st.set_page_config(page_title="MedChem Articles Dashboard", layout="wide")
 
 # Your Elsevier API Key for Cell/ScienceDirect
 ELSEVIER_API_KEY = "53600672464eaa44118e455655e8d412" 
@@ -79,13 +79,13 @@ def fetch_stratified_data(issn_list, depth):
     return results
 
 # --- 3. Sidebar UI ---
-st.sidebar.title("📑 Journal Feeds")
+st.sidebar.title(" Journal Feeds")
 discipline = st.sidebar.radio("Select Category:", list(JOURNAL_BINS.keys()))
 st.sidebar.info(f"**Targeting:** {JOURNAL_BINS[discipline]['display']}")
 limit_per_journal = st.sidebar.slider("Articles per journal:", 2, 15, 5)
 
 # --- 4. Main Display ---
-st.title(f"🚀 {discipline} Feed")
+st.title(f" {discipline} Feed")
 
 if st.button(f"Pull Latest from {discipline}"):
     with st.spinner("Compiling cross-journal feed..."):

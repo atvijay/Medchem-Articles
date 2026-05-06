@@ -1,219 +1,123 @@
-# smartcyp_docking_app.py
-import streamlit as st
+import requests
 import pandas as pd
-from rdkit import Chem
-from rdkit.Chem import AllChem, Draw
-from stmol import showmol
-import py3Dmol
-from streamlit_ketcher import st_ketcher
+import streamlit as st
+from datetime import datetime
+import time
 
-# Optional: Vina docking
-try:
-    from vina import Vina
-    vina_available = True
-except ImportError:
-    vina_available = False
+# --- 1. Dashboard Configuration ---
+st.set_page_config(page_title="Discovery Intelligence Dashboard", layout="wide")
 
-st.set_page_config(page_title="SMARTCyp Docking Pro", layout="wide")
+# Your Elsevier API Key for Cell/ScienceDirect
+ELSEVIER_API_KEY = "53600672464eaa44118e455655e8d412" 
 
-# -------------------------------
-# Utilities
-# -------------------------------
-def safe_shortest_path_length(mol, idx1, idx2):
-    try:
-        path = Chem.GetShortestPath(mol, idx1, idx2)
-        return len(path) if path else 999
-    except:
-        return 999
+JOURNAL_BINS = {
+    "Medicinal Chemistry": {
+        "issns": ["0022-2623", "1948-5875", "1860-7179", "2632-8682", "1359-6446", "0968-0896", "0960-894X", "1552-4450", "1078-8956", "2451-9456"],
+        "display": "JMC, ACS MCL, ChemMedChem, RSC, DDT, BMCL, Nature, Cell"
+    },
+    "Cheminformatics & CompChem": {
+        "issns": ["1758-2946", "1549-9596", "0022-2623"],
+        "display": "J. Cheminform, JCIM, J. Med. Chem."
+    },
+    "DMPK": {
+        "issns": ["1347-4367", "1880-0920", "0022-2623"],
+        "display": "DMPK Journal, J. Med. Chem."
+    }
+}
 
-def get_atom_type(atom):
-    symbol = atom.GetSymbol()
-    if atom.GetIsAromatic() and symbol == "C":
-        return ("Aromatic_C", 62.0)
-    if symbol == "C":
-        if atom.GetHybridization() == Chem.HybridizationType.SP3:
-            h = atom.GetTotalNumHs()
-            if h == 3: return ("Primary_C", 55.0)
-            if h == 2: return ("Secondary_C", 50.0)
-            if h == 1: return ("Tertiary_C", 48.0)
-    if symbol == "N": return ("Amine_N", 45.0)
-    if symbol == "O": return ("Oxygen", 52.0)
-    return ("Other", 80.0)
+# --- 2. Helper Functions ---
 
-def accessibility_score(atom):
-    penalty = 0
-    if atom.GetDegree() >= 3: penalty += 5
-    if atom.IsInRing(): penalty += 3
-    return penalty
+def get_image_url(doi, publisher):
+    """Predicts graphical abstract URLs for ACS and RSC journals"""
+    suffix = doi.split("/")[-1]
+    if "American Chemical Society" in publisher:
+        # Standard ACS TOC pattern
+        return f"https://pubs.acs.org/cms/10.1021/{suffix}/asset/images/medium/{suffix}_abs.gif"
+    elif "Royal Society of Chemistry" in publisher:
+        # Standard RSC TOC pattern
+        return f"https://www.rsc.org/library/RO/img/graphical-abstracts/{suffix.lower()}.gif"
+    return None
 
-# -------------------------------
-# SMARTCyp Scoring Engine
-# -------------------------------
-def analyze_isoform(mol, isoform_type):
+def fetch_stratified_data(issn_list, depth):
+    """Loops through each journal to ensure a diverse feed"""
+    base_url = "https://api.crossref.org/works"
     results = []
-    try:
-        AllChem.ComputeGasteigerCharges(mol)
-    except:
-        pass
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-    anchors_2d6 = mol.GetSubstructMatches(Chem.MolFromSmarts("[NX3;!$(NC=O)]"))
-    anchors_2c9 = mol.GetSubstructMatches(Chem.MolFromSmarts("C(=O)[O]"))
-
-    for atom in mol.GetAtoms():
-        idx = atom.GetIdx()
-        atom_type, base_energy = get_atom_type(atom)
-        score = base_energy + accessibility_score(atom)
+    for idx, issn in enumerate(issn_list):
+        status_text.text(f"Fetching from ISSN: {issn}...")
+        params = {
+            'filter': f'type:journal-article,issn:{issn}',
+            'sort': 'published', 'order': 'desc', 'rows': depth
+        }
         try:
-            charge = float(atom.GetProp('_GasteigerCharge'))
-            if charge == charge:
-                score += abs(charge) * 5
-        except: pass
+            response = requests.get(base_url, params=params, timeout=10)
+            if response.status_code == 200:
+                items = response.json().get('message', {}).get('items', [])
+                for item in items:
+                    d_parts = item.get('issued', {}).get('date-parts', [[2026, 1, 1]])[0]
+                    doi = item.get('DOI')
+                    pub = item.get('publisher', 'Unknown')
+                    
+                    results.append({
+                        'SortDate': datetime(d_parts[0], d_parts[1] if len(d_parts)>1 else 1, d_parts[2] if len(d_parts)>2 else 1),
+                        'DisplayDate': f"{d_parts[0]}-{d_parts[1]:02d}",
+                        'Journal': item.get('container-title', ['N/A'])[0],
+                        'Title': item.get('title', ['No Title'])[0],
+                        'DOI': doi,
+                        'Publisher': pub,
+                        'Image': get_image_url(doi, pub)
+                    })
+            time.sleep(0.1) # Be polite to the API
+        except: continue
+        progress_bar.progress((idx + 1) / len(issn_list))
 
-        # Isoform corrections
-        if isoform_type == "CYP2D6" and anchors_2d6:
-            distances = [safe_shortest_path_length(mol, idx, a[0]) for a in anchors_2d6]
-            score += min(distances) * 1.5
-        elif isoform_type == "CYP2C9" and anchors_2c9:
-            distances = [safe_shortest_path_length(mol, idx, a[0]) for a in anchors_2c9]
-            score += min(distances) * 1.2
+    status_text.empty()
+    progress_bar.empty()
+    return results
 
-        results.append({"Atom": idx+1, "Type": atom_type, "Score": round(score,2)})
+# --- 3. Sidebar UI ---
+st.sidebar.title("📑 Journal Feeds")
+discipline = st.sidebar.radio("Select Category:", list(JOURNAL_BINS.keys()))
+st.sidebar.info(f"**Targeting:** {JOURNAL_BINS[discipline]['display']}")
+limit_per_journal = st.sidebar.slider("Articles per journal:", 2, 15, 5)
 
-    df = pd.DataFrame(results)
-    min_s, max_s = df["Score"].min(), df["Score"].max()
-    if max_s - min_s < 1e-6:
-        df["NormScore"] = 0.0
-    else:
-        df["NormScore"] = (df["Score"]-min_s)/(max_s-min_s)
-    return df.sort_values("Score")
+# --- 4. Main Display ---
+st.title(f"🚀 {discipline} Feed")
 
-# -------------------------------
-# Metabolite Generator
-# -------------------------------
-def generate_metabolites(mol, df):
-    metabolites = []
-    top_atoms = [int(x-1) for x in df.head(3)["Atom"]]
-
-    for atom_idx in top_atoms:
-        atom = mol.GetAtomWithIdx(atom_idx)
-        # Hydroxylation
-        if atom.GetSymbol() == "C":
-            m = Chem.RWMol(mol)
-            o_idx = m.AddAtom(Chem.Atom("O"))
-            m.AddBond(atom_idx, o_idx, Chem.BondType.SINGLE)
-            try:
-                metabolites.append({"Type":"Hydroxylation","Atom":atom_idx+1,"SMILES":Chem.MolToSmiles(m)})
-            except: pass
-        # N-dealkylation
-        if atom.GetSymbol() == "N":
-            for nbr in atom.GetNeighbors():
-                if nbr.GetSymbol()=="C":
-                    m = Chem.RWMol(mol)
-                    m.RemoveBond(atom_idx,nbr.GetIdx())
-                    try:
-                        metabolites.append({"Type":"N-dealkylation","Atom":atom_idx+1,"SMILES":Chem.MolToSmiles(m)})
-                    except: pass
-                    break
-        # O-dealkylation
-        if atom.GetSymbol() == "O":
-            for nbr in atom.GetNeighbors():
-                if nbr.GetSymbol()=="C":
-                    m = Chem.RWMol(mol)
-                    m.RemoveBond(atom_idx,nbr.GetIdx())
-                    try:
-                        metabolites.append({"Type":"O-dealkylation","Atom":atom_idx+1,"SMILES":Chem.MolToSmiles(m)})
-                    except: pass
-                    break
-    return pd.DataFrame(metabolites)
-
-# -------------------------------
-# Docking-Constrained Scoring
-# -------------------------------
-def docking_score(df, docked_mol, heme_coord=[0,0,0]):
-    conf = docked_mol.GetConformer()
-    distances = []
-    for atom in docked_mol.GetAtoms():
-        pos = conf.GetAtomPosition(atom.GetIdx())
-        dist = ((pos.x - heme_coord[0])**2 + (pos.y - heme_coord[1])**2 + (pos.z - heme_coord[2])**2)**0.5
-        distances.append(dist)
-    df["DockDist"] = distances
-    df["DockScore"] = df["NormScore"]*0.6 + 1/(df["DockDist"]+1e-3)*0.4
-    return df.sort_values("DockScore",ascending=False)
-
-# -------------------------------
-# Streamlit UI
-# -------------------------------
-st.title("🧪 SMARTCyp Docking Pro")
-
-with st.sidebar:
-    selected_isoform = st.selectbox("Isoform",["CYP3A4","CYP2D6","CYP2C9"])
-    if vina_available:
-        st.success("Vina available for docking")
-    else:
-        st.warning("Vina not installed. Docking disabled.")
-
-# Input
-st.subheader("Molecule Input")
-mode = st.radio("Input type:", ["Draw","SMILES"])
-smiles = None
-if mode=="Draw":
-    s = st_ketcher(key="ketcher")
-    if s: smiles=s
-else:
-    s = st.text_input("Enter SMILES","CNC1=CC=C(C=C1)C2=CC=CC=C2")
-    if s: smiles=s.strip()
-
-if smiles:
-    st.code(smiles)
-    mol = Chem.MolFromSmiles(smiles)
-    if mol:
-        mol = max(Chem.GetMolFrags(mol, asMols=True), key=lambda m:m.GetNumAtoms())
-        tab1,tab2,tab3,tab4=st.tabs(["Analysis","Comparison","3D","Metabolites"])
-
-        # -------- TAB 1: Analysis
-        with tab1:
-            df=analyze_isoform(mol,selected_isoform)
-            st.dataframe(df)
-            img=Draw.MolToImage(mol,highlightAtoms=[int(x-1) for x in df.head(3)["Atom"]],size=(400,400))
-            st.image(img)
-            df_exp=df.copy()
-            df_exp["SMILES"]=smiles
-            df_exp["Isoform"]=selected_isoform
-            st.download_button("Download CSV",df_exp.to_csv(index=False),"results.csv")
-
-        # -------- TAB 2: Comparison
-        with tab2:
-            for iso in ["CYP3A4","CYP2D6","CYP2C9"]:
-                st.subheader(iso)
-                df_iso=analyze_isoform(mol,iso)
-                st.dataframe(df_iso.head(5))
-
-        # -------- TAB 3: 3D
-        with tab3:
-            m3d = Chem.AddHs(mol)
-            if AllChem.EmbedMolecule(m3d)==0:
-                view=py3Dmol.view(width=600,height=400)
-                view.addModel(Chem.MolToMolBlock(m3d),"mol")
-                view.setStyle({"stick":{}})
-                view.zoomTo()
-                showmol(view)
-
-        # -------- TAB 4: Metabolites
-        with tab4:
-            df=analyze_isoform(mol,selected_isoform)
-            met_df=generate_metabolites(mol,df)
-            if not met_df.empty:
-                st.dataframe(met_df)
-                for _,row in met_df.iterrows():
-                    st.write(row["Type"])
-                    m = Chem.MolFromSmiles(row["SMILES"])
-                    if m: st.image(Draw.MolToImage(m))
-                st.download_button("Download Metabolites",met_df.to_csv(index=False),"metabolites.csv")
-            else:
-                st.info("No metabolites generated")
-
-st.sidebar.info("""
-**SMARTCyp Pro v1.0**
-Predicts metabolic sites for CYP3A4, 2D6, and 2C9.
-Built using RDKit and SMARTCyp 3.0 logic.
-""")
+if st.button(f"Pull Latest from {discipline}"):
+    with st.spinner("Compiling cross-journal feed..."):
+        data = fetch_stratified_data(JOURNAL_BINS[discipline]['issns'], limit_per_journal)
+        
+        if data:
+            df = pd.DataFrame(data).sort_values(by='SortDate', ascending=False)
+            
+            for _, row in df.iterrows():
+                with st.container():
+                    col1, col2 = st.columns([1, 3])
+                    
+                    with col1:
+                        # --- CRITICAL FIX: The Type Check ---
+                        img_val = row['Image']
+                        if isinstance(img_val, str) and img_val.strip():
+                            try:
+                                st.image(img_val, use_container_width=True)
+                            except:
+                                st.caption("🖼️ Preview Blocked")
+                        else:
+                            # Elsevier specific note
+                            if "Elsevier" in row['Publisher'] or "Cell" in row['Publisher']:
+                                st.info("Elsevier: View via DOI")
+                            else:
+                                st.caption("No Preview Available")
+                    
+                    with col2:
+                        st.markdown(f"#### [{row['Title']}](https://doi.org/{row['DOI']})")
+                        st.write(f"**{row['Journal']}** | {row['DisplayDate']}")
+                        st.caption(f"DOI: {row['DOI']} | Publisher: {row['Publisher']}")
+                    
+                    st.divider()
+        else:
+            st.warning("No articles found.")
